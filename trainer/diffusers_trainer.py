@@ -44,6 +44,61 @@ from PIL.Image import Image as Img
 from typing import Dict, List, Generator, Tuple
 from scipy.interpolate import interp1d
 
+import diffusers.models.attention as origAttention
+from tome.merge import kth_bipartite_soft_matching, merge_wavg
+enable_tome = False
+def modCAForward(self, hidden_states, context=None, mask=None):
+    #added-------------------------
+    is_self_attention = context is None
+    #------------------------------
+    batch_size, sequence_length, _ = hidden_states.shape
+
+    query = self.to_q(hidden_states)
+    context = context if context is not None else hidden_states
+    key = self.to_k(context)
+    value = self.to_v(context)
+
+    dim = query.shape[-1]
+
+    query = self.reshape_heads_to_batch_dim(query)
+    key = self.reshape_heads_to_batch_dim(key)
+    value = self.reshape_heads_to_batch_dim(value)
+
+    #added-------------------------
+    if enable_tome and is_self_attention and hidden_states.shape[1] >= 2048:
+        with torch.no_grad():
+            k_heads_extracted = rearrange(key, 'b n (h d) -> b n h d', h=self.heads)
+            k_mean = k_heads_extracted.mean(-2)
+            merge, _ = kth_bipartite_soft_matching(
+                k_mean,
+                4
+            )
+        key = merge_wavg(merge, key, None)
+        value = merge_wavg(merge, value, None)
+    #------------------------------
+
+
+    # TODO(PVP) - mask is currently never used. Remember to re-implement when used
+
+    # attention, what we cannot get enough of
+    if self._use_memory_efficient_attention_xformers:
+        hidden_states = self._memory_efficient_attention_xformers(query, key, value)
+        # Some versions of xformers return output in fp32, cast it back to the dtype of the input
+        hidden_states = hidden_states.to(query.dtype)
+    else:
+        if self._slice_size is None or query.shape[0] // self._slice_size == 1:
+            hidden_states = self._attention(query, key, value)
+        else:
+            hidden_states = self._sliced_attention(query, key, value, sequence_length, dim)
+
+    # linear proj
+    hidden_states = self.to_out[0](hidden_states)
+    # dropout
+    hidden_states = self.to_out[1](hidden_states)
+    return hidden_states
+#hook
+origAttention.CrossAttention.forward = modCAForward
+
 torch.backends.cuda.matmul.allow_tf32 = True
 
 # defaults should be good for everyone
@@ -93,6 +148,7 @@ parser.add_argument('--no_migration', type=bool_t, default='False', help='Do not
 parser.add_argument('--skip_validation', type=bool_t, default='False', help='Skip validation of images, useful for speeding up loading of very large datasets that have already been validated.')
 parser.add_argument('--extended_mode_chunks', type=int, default=0, help='Enables extended mode for tokenization with given amount of maximum chunks. Values < 2 disable.')
 parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
+parser.add_argument('--use_tome', type=bool_t, default='False', help='Use tome')
 
 
 args = parser.parse_args()
@@ -676,9 +732,12 @@ class EMAModel:
         ]
 
 def main():
+    global enable_tome
     rank = get_rank()
     world_size = get_world_size()
     torch.cuda.set_device(rank)
+    if args.use_tome:
+        enable_tome = True
 
     if rank == 0:
         os.makedirs(args.output_path, exist_ok=True)
