@@ -69,7 +69,7 @@ def modCAForward(self, hidden_states, context=None, mask=None):
     #added-------------------------
     if enable_tome and is_self_attention and hidden_states.shape[1] >= 2048:
         with torch.no_grad():
-            k_heads_extracted = rearrange(key, 'b n (h d) -> b n h d', h=self.heads)
+            k_heads_extracted = einops.rearrange(key, 'b n (h d) -> b n h d', h=self.heads)
             k_mean = k_heads_extracted.mean(-2)
             merge, _ = kth_bipartite_soft_matching(
                 k_mean,
