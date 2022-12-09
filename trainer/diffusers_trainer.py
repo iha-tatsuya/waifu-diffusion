@@ -46,6 +46,8 @@ from scipy.interpolate import interp1d
 
 import diffusers.models.attention as origAttention
 from tome.merge import kth_bipartite_soft_matching, merge_wavg
+import einops
+
 enable_tome = False
 def modCAForward(self, hidden_states, context=None, mask=None):
     #added-------------------------
@@ -73,10 +75,9 @@ def modCAForward(self, hidden_states, context=None, mask=None):
                 k_mean,
                 4
             )
-        key = merge_wavg(merge, key, None)
-        value = merge_wavg(merge, value, None)
+        key, _ = merge_wavg(merge, key, None)
+        value, _ = merge_wavg(merge, value, None)
     #------------------------------
-
 
     # TODO(PVP) - mask is currently never used. Remember to re-implement when used
 
